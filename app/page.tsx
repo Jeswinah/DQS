@@ -3,7 +3,7 @@
 import React from 'react';
 import { useRouter } from 'next/navigation';
 import { MdInsights, MdSecurity, MdSpeed, MdAutoAwesome } from 'react-icons/md';
-import { parseFileAndCalculateMetrics, storeMetrics } from '../lib/parseFile';
+import { parseFileAndCalculateMetrics, storeMetrics, assessDataQuality, storeAPIResponse } from '../lib/parseFile';
 
 /**
  * Landing Page: Secure Data Input Panel
@@ -34,26 +34,35 @@ export default function Home() {
 
     setIsAnalyzing(true);
     setError(null);
-    setProgress('Reading file...');
+    setProgress('Uploading file to assessment API...');
 
     try {
-      setProgress('Parsing data...');
-      const metrics = await parseFileAndCalculateMetrics(selectedFile);
+      // Call the API to assess data quality
+      const apiResponse = await assessDataQuality(selectedFile);
       
-      setProgress('Calculating quality scores...');
+      setProgress('Processing assessment results...');
       await new Promise(resolve => setTimeout(resolve, 500));
       
       setProgress('Storing results...');
-      storeMetrics(metrics);
+      storeAPIResponse(apiResponse);
       
       setProgress('Redirecting to dashboard...');
       await new Promise(resolve => setTimeout(resolve, 300));
       
       router.push('/dashboard');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to analyze file');
-      setIsAnalyzing(false);
-      setProgress('');
+      console.error('API Assessment failed:', err);
+      // Fallback to local analysis if API fails
+      setProgress('API unavailable, using local analysis...');
+      try {
+        const metrics = await parseFileAndCalculateMetrics(selectedFile);
+        storeMetrics(metrics);
+        router.push('/dashboard');
+      } catch (localErr) {
+        setError(localErr instanceof Error ? localErr.message : 'Failed to analyze file');
+        setIsAnalyzing(false);
+        setProgress('');
+      }
     }
   };
 

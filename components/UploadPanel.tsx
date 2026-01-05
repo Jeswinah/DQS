@@ -3,7 +3,7 @@ import { Role } from '../types/dqs';
 
 interface Props {
   role: Role;
-  onAnalyze: () => void;
+  onAnalyze: (file: File | null) => void;
 }
 
 /**
@@ -11,9 +11,54 @@ interface Props {
  * Accepts CSV/Excel/API. No raw data displayed.
  */
 export const UploadPanel: React.FC<Props> = ({ role, onAnalyze }) => {
-  const [sensitivity, setSensitivity] = React.useState('Medium');
+  // const [sensitivity, setSensitivity] = React.useState('Medium');
   const [sourceType, setSourceType] = React.useState('File');
   const [governanceAck, setGovernanceAck] = React.useState(false);
+  const [selectedFile, setSelectedFile] = React.useState<File | null>(null);
+  const [isUploading, setIsUploading] = React.useState(false);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] || null;
+    setSelectedFile(file);
+  };
+
+  const handleAnalyze = async () => {
+    if (!selectedFile) return;
+
+    setIsUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+
+      const response = await fetch('https://akash248.app.n8n.cloud/webhook/visa-dqs-assessment', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.statusText}`);
+      }
+
+      // Check if response has content before parsing JSON
+      const contentType = response.headers.get('content-type');
+      let data = null;
+      
+      if (contentType && contentType.includes('application/json')) {
+        const text = await response.text();
+        if (text) {
+          data = JSON.parse(text);
+          console.log('Analysis response:', data);
+        }
+      }
+      
+      onAnalyze(selectedFile);
+    } catch (error) {
+      console.error('Error uploading file:', error);
+      alert('Failed to upload file. Please try again.');
+    } finally {
+      setIsUploading(false);
+    }
+  };
 
   return (
     <section className="card rounded-xl p-5 shadow" style={{ background: '#fff', border: '1px solid #e2e8f0' }}>
@@ -46,11 +91,17 @@ export const UploadPanel: React.FC<Props> = ({ role, onAnalyze }) => {
               type="file"
               accept=".csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel"
               className="w-full text-sm"
+              onChange={handleFileChange}
             />
+            {selectedFile && (
+              <p className="mt-1 text-xs text-slate-500">
+                Selected: {selectedFile.name}
+              </p>
+            )}
           </div>
         )}
 
-        {/* Sensitivity */}
+        {/* Sensitivity
         <div>
           <label className="mb-1 block font-medium">Sensitivity Level</label>
           <div className="flex gap-2">
@@ -67,7 +118,7 @@ export const UploadPanel: React.FC<Props> = ({ role, onAnalyze }) => {
               </button>
             ))}
           </div>
-        </div>
+        </div> */}
 
         {/* Governance acknowledgement */}
         <label className="flex items-start gap-2">
@@ -82,12 +133,12 @@ export const UploadPanel: React.FC<Props> = ({ role, onAnalyze }) => {
 
         {/* Analyze button */}
         <button
-          disabled={!governanceAck}
-          onClick={onAnalyze}
+          disabled={!governanceAck || !selectedFile || isUploading}
+          onClick={handleAnalyze}
           className="mt-1 w-full rounded-lg py-2.5 text-sm font-semibold text-white transition disabled:opacity-40"
           style={{ background: '#1229D0' }}
         >
-          🔍 Analyze Data Quality
+          {isUploading ? '⏳ Uploading...' : '🔍 Analyze Data Quality'}
         </button>
 
         <div className="text-xs" style={{ color: '#94a3b8' }}>

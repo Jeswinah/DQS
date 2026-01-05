@@ -22,6 +22,20 @@ export interface ColumnStat {
   dataType: string;
 }
 
+// API Response from webhook
+export interface APIResponse {
+  compositeDQS: number; // 0-100
+  qualityGrade: string; // A, B, C, D, F
+  dimensions: string[]; // Array of dimension data (can be empty)
+  explanations: string[]; // Array of explanation strings
+  recommendations: string[]; // Array of recommendation strings
+  timestamp: string; // ISO 8601 format
+  complianceStatus: string; // e.g., 'REQUIRES_REMEDIATION'
+  evaluationId: string; // Unique evaluation identifier
+  riskLevel: string; // HIGH, MEDIUM, LOW
+  dataHandling: string; // Data handling policy description
+}
+
 export interface DQSummary {
   score: number;
   confidence: number; // 0-100
@@ -43,4 +57,10 @@ export interface DQSummary {
     policies: string[];
     modelVersion: string;
   };
+  // New fields from API
+  qualityGrade?: string;
+  complianceStatus?: string;
+  evaluationId?: string;
+  riskLevel?: string;
+  dataHandling?: string;
 }

@@ -3,6 +3,8 @@
  * Extracts data quality metrics from uploaded datasets
  */
 
+import type { APIResponse } from '../types/dqs';
+
 export interface ParsedDataset {
   fileName: string;
   records: number;
@@ -383,3 +385,65 @@ export function getStoredMetrics(): DQMetrics | null {
 export function getStoredTimestamp(): string | null {
   return localStorage.getItem('dqs_timestamp');
 }
+
+/**
+ * Call the DQS Assessment API
+ */
+const API_URL = "https://ebin-102340.app.n8n.cloud/webhook/visa-dqs-assessment";
+
+export async function assessDataQuality(file: File): Promise<APIResponse> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const response = await fetch(API_URL, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    throw new Error(`API request failed with status ${response.status}`);
+  }
+
+  // Check if response has content before parsing JSON
+  const contentType = response.headers.get('content-type');
+  if (!contentType || !contentType.includes('application/json')) {
+    throw new Error('API did not return JSON response');
+  }
+
+  const text = await response.text();
+  if (!text) {
+    throw new Error('API returned empty response');
+  }
+
+  const data = JSON.parse(text);
+  
+  // The API returns an array with a single object
+  if (Array.isArray(data) && data.length > 0) {
+    return data[0] as APIResponse;
+  }
+  
+  throw new Error('Invalid API response format');
+}
+
+/**
+ * Store API response in localStorage
+ */
+export function storeAPIResponse(response: APIResponse): void {
+  localStorage.setItem('dqs_api_response', JSON.stringify(response));
+  localStorage.setItem('dqs_timestamp', response.timestamp);
+}
+
+/**
+ * Retrieve API response from localStorage
+ */
+export function getStoredAPIResponse(): APIResponse | null {
+  const stored = localStorage.getItem('dqs_api_response');
+  if (!stored) return null;
+  
+  try {
+    return JSON.parse(stored) as APIResponse;
+  } catch {
+    return null;
+  }
+}
+

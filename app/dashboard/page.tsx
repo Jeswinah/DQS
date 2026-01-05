@@ -21,8 +21,8 @@ import {
 import { RecommendationsList } from '../../components/RecommendationsList';
 import { CompliancePanel } from '../../components/CompliancePanel';
 import { MetadataSummary } from '../../components/MetadataSummary';
-import { getStoredMetrics, getStoredTimestamp, type DQMetrics } from '../../lib/parseFile';
-import type { DQSummary, Role, DimensionScore } from '../../types/dqs';
+import { getStoredMetrics, getStoredTimestamp, assessDataQuality, storeAPIResponse, getStoredAPIResponse, type DQMetrics } from '../../lib/parseFile';
+import type { DQSummary, Role, DimensionScore, APIResponse } from '../../types/dqs';
 
 // Generate explanations based on scores
 function generateExplanation(dimension: string, score: number): string {
@@ -166,6 +166,87 @@ function convertToDQSummary(metrics: DQMetrics, timestamp: string): DQSummary {
       policies: ['Data Completeness Policy', 'Format Validation Rules', 'Duplicate Detection Policy'],
       modelVersion: 'dq-agentic-v2.4.1',
     },
+  };
+}
+
+// Convert API response to DQSummary format
+function convertAPIResponseToSummary(apiResponse: APIResponse): DQSummary {
+  // Parse explanations from array
+  const explanationTexts = apiResponse.explanations || [];
+  
+  // Parse recommendations from array
+  const recommendationItems = (apiResponse.recommendations || []).map((rec, idx) => ({
+    id: `api-r${idx + 1}`,
+    title: rec,
+    severity: apiResponse.riskLevel === 'HIGH' ? 'High' as const : 
+              apiResponse.riskLevel === 'MEDIUM' ? 'Medium' as const : 'Low' as const,
+    expectedImprovement: 0,
+    action: 'Review'
+  }));
+
+  // If no recommendations from API, add a default one based on score
+  if (recommendationItems.length === 0 && apiResponse.compositeDQS < 80) {
+    recommendationItems.push({
+      id: 'api-r1',
+      title: 'Review data quality issues and implement corrective measures',
+      severity: apiResponse.riskLevel === 'HIGH' ? 'High' : 'Medium',
+      expectedImprovement: Math.round(80 - apiResponse.compositeDQS),
+      action: 'Review'
+    });
+  }
+
+  // Create default dimensions if empty from API
+  const dimensions: DimensionScore[] = [];
+  if (apiResponse.dimensions && apiResponse.dimensions.length > 0) {
+    // Parse dimension data if available
+    apiResponse.dimensions.forEach((dim, idx) => {
+      dimensions.push({
+        id: `dim${idx}`,
+        name: typeof dim === 'string' ? dim : `Dimension ${idx + 1}`,
+        score: apiResponse.compositeDQS,
+        explanation: explanationTexts[idx] || 'No explanation available'
+      });
+    });
+  } else {
+    // Generate default dimensions based on score
+    const defaultDimensions = [
+      'Completeness', 'Accuracy', 'Consistency', 'Timeliness', 
+      'Uniqueness', 'Validity', 'Integrity'
+    ];
+    defaultDimensions.forEach((name, idx) => {
+      dimensions.push({
+        id: name.toLowerCase(),
+        name,
+        score: apiResponse.compositeDQS,
+        explanation: explanationTexts[idx] || generateExplanation(name.toLowerCase(), apiResponse.compositeDQS)
+      });
+    });
+  }
+
+  return {
+    score: apiResponse.compositeDQS,
+    confidence: 85, // Default confidence
+    timestamp: new Date(apiResponse.timestamp).toLocaleString(),
+    dimensions,
+    recommendations: recommendationItems,
+    metadata: {
+      records: 0, // API doesn't provide this
+      columns: 0, // API doesn't provide this
+      missingValues: 0,
+      anomalies: 0,
+      fileName: 'API Assessment',
+    },
+    audit: {
+      hash: '0x' + apiResponse.evaluationId.padStart(40, '0'),
+      evaluatedAt: apiResponse.timestamp,
+      policies: ['Visa-Level Data Quality Standards', 'Risk Assessment Policy'],
+      modelVersion: 'visa-dqs-v1.0',
+    },
+    qualityGrade: apiResponse.qualityGrade,
+    complianceStatus: apiResponse.complianceStatus.trim(),
+    evaluationId: apiResponse.evaluationId,
+    riskLevel: apiResponse.riskLevel,
+    dataHandling: apiResponse.dataHandling.replace(/^"|"$/g, ''),
   };
 }
 
@@ -375,6 +456,15 @@ export default function Dashboard() {
   const [loading, setLoading] = React.useState(true);
 
   React.useEffect(() => {
+    // First try to load API response
+    const apiResponse = getStoredAPIResponse();
+    if (apiResponse) {
+      setSummary(convertAPIResponseToSummary(apiResponse));
+      setLoading(false);
+      return;
+    }
+
+    // Fallback to old metrics format
     const metrics = getStoredMetrics();
     const timestamp = getStoredTimestamp();
     
@@ -587,6 +677,48 @@ export default function Dashboard() {
                     <div className="text-xs font-medium" style={{ color: '#dc2626' }}>Anomalies</div>
                   </div>
                 </div>
+
+                {/* API Assessment Details */}
+                {summary.qualityGrade && (
+                  <div className="mt-6 rounded-xl p-4 sm:p-6" style={{ background: 'linear-gradient(135deg, #fef3c7, #fde68a)', border: '2px solid #fbbf24' }}>
+                    <h3 className="mb-4 text-lg font-bold" style={{ color: '#78350f' }}>Assessment Details</h3>
+                    <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                      <div>
+                        <div className="text-xs font-medium" style={{ color: '#92400e' }}>Quality Grade</div>
+                        <div className="text-2xl font-extrabold" style={{ color: getScoreColor(summary.score) }}>{summary.qualityGrade}</div>
+                      </div>
+                      {summary.riskLevel && (
+                        <div>
+                          <div className="text-xs font-medium" style={{ color: '#92400e' }}>Risk Level</div>
+                          <div className="text-lg font-bold" style={{ 
+                            color: summary.riskLevel === 'HIGH' ? '#dc2626' : 
+                                   summary.riskLevel === 'MEDIUM' ? '#f59e0b' : '#10b981' 
+                          }}>{summary.riskLevel}</div>
+                        </div>
+                      )}
+                      {summary.complianceStatus && (
+                        <div>
+                          <div className="text-xs font-medium" style={{ color: '#92400e' }}>Compliance</div>
+                          <div className="text-sm font-bold" style={{ color: '#78350f' }}>
+                            {summary.complianceStatus.replace('_', ' ')}
+                          </div>
+                        </div>
+                      )}
+                      {summary.evaluationId && (
+                        <div>
+                          <div className="text-xs font-medium" style={{ color: '#92400e' }}>Evaluation ID</div>
+                          <div className="text-sm font-mono font-bold" style={{ color: '#78350f' }}>#{summary.evaluationId}</div>
+                        </div>
+                      )}
+                    </div>
+                    {summary.dataHandling && (
+                      <div className="mt-4 rounded-lg p-3" style={{ background: 'rgba(255,255,255,0.6)' }}>
+                        <div className="text-xs font-medium" style={{ color: '#92400e' }}>Data Handling</div>
+                        <div className="mt-1 text-xs" style={{ color: '#78350f' }}>{summary.dataHandling}</div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </section>
           )}
