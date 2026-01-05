@@ -413,16 +413,18 @@ const DIMENSION_CONFIGS: DimensionConfig[] = [
         const filled = rows.length * (1 - col.nullRatio);
         filledCells += filled;
         
-        if (col.nullRatio > 0.1) {
+        if (col.nullRatio > 0.05) {
           impactedColumns.push(col.name);
           findings.push(`Column '${col.name}' has ${Math.round(col.nullRatio * 100)}% missing values`);
         }
       }
       
-      const score = Math.round((filledCells / totalCells) * 100);
+      const completenessRatio = filledCells / totalCells;
+      // More aggressive scoring - each 1% missing = 1.5 point deduction
+      const score = Math.round(Math.max(0, 100 - ((1 - completenessRatio) * 150)));
       
-      if (score < 80) {
-        findings.push(`Overall data completeness is ${score}%, below the 80% threshold`);
+      if (score < 90) {
+        findings.push(`Overall data completeness is ${Math.round(completenessRatio * 100)}%, with ${Math.round((1-completenessRatio) * totalCells)} missing cells`);
       }
       
       return { score, findings, impactedColumns };
@@ -436,27 +438,56 @@ const DIMENSION_CONFIGS: DimensionConfig[] = [
     scorer: (rows, metadata) => {
       const findings: string[] = [];
       const impactedColumns: string[] = [];
-      let consistencyIssues = 0;
-      let totalChecks = 0;
+      let inconsistentRecords = 0;
+      const totalRecords = rows.length;
       
       for (const col of metadata.schema) {
-        totalChecks++;
-        
-        // Check for mixed types (inconsistency indicator)
+        // Check for mixed types (severe inconsistency)
         if (col.inferredType === 'mixed') {
-          consistencyIssues++;
+          inconsistentRecords += Math.round(rows.length * 0.3); // 30% penalty per mixed column
           impactedColumns.push(col.name);
-          findings.push(`Column '${col.name}' has inconsistent data types`);
+          findings.push(`Column '${col.name}' has inconsistent data types (mixed string/number/date)`);
         }
         
         // Check for format consistency in patterns
         if (col.patterns.length > 1) {
-          consistencyIssues += 0.5;
-          findings.push(`Column '${col.name}' has multiple data formats: ${col.patterns.join(', ')}`);
+          inconsistentRecords += Math.round(rows.length * 0.1);
+          if (!impactedColumns.includes(col.name)) impactedColumns.push(col.name);
+          findings.push(`Column '${col.name}' has multiple formats: ${col.patterns.join(', ')}`);
+        }
+        
+        // Check for case inconsistencies in categorical columns
+        if (col.inferredType === 'string') {
+          const values = rows.map(r => r[col.name]).filter(v => typeof v === 'string' && v.length > 0) as string[];
+          if (values.length > 0) {
+            // Check if same values appear in different cases (e.g., "VISA" vs "visa")
+            const normalized = new Map<string, Set<string>>();
+            for (const v of values) {
+              const key = v.toLowerCase();
+              if (!normalized.has(key)) normalized.set(key, new Set());
+              normalized.get(key)!.add(v);
+            }
+            
+            let caseInconsistencies = 0;
+            for (const [, variants] of normalized) {
+              if (variants.size > 1) {
+                caseInconsistencies += variants.size - 1;
+              }
+            }
+            
+            if (caseInconsistencies > 0) {
+              inconsistentRecords += caseInconsistencies * 5;
+              if (!impactedColumns.includes(col.name)) impactedColumns.push(col.name);
+              findings.push(`Column '${col.name}' has ${caseInconsistencies} case inconsistencies (e.g., "VISA" vs "visa")`);
+            }
+          }
         }
       }
       
-      const score = Math.round(Math.max(0, 100 - (consistencyIssues / totalChecks) * 50));
+      // Score based on inconsistent record rate
+      const inconsistencyRate = inconsistentRecords / (totalRecords * metadata.schema.length);
+      const score = Math.round(Math.max(0, 100 - (inconsistencyRate * 500)));
+      
       return { score, findings, impactedColumns };
     }
   },
@@ -464,13 +495,9 @@ const DIMENSION_CONFIGS: DimensionConfig[] = [
     id: 'uniqueness',
     name: 'Uniqueness',
     baseWeight: 0.15,
-    applicabilityCheck: (metadata) => {
-      // Applicable if there are identifier columns
-      return metadata.schema.some(c => 
-        c.inferredType === 'identifier' || 
-        c.name.toLowerCase().includes('id') ||
-        c.uniqueRatio > 0.9
-      );
+    applicabilityCheck: () => {
+      // Always applicable - uniqueness matters for all datasets
+      return true;
     },
     scorer: (rows, metadata) => {
       const findings: string[] = [];
@@ -491,8 +518,8 @@ const DIMENSION_CONFIGS: DimensionConfig[] = [
       
       const duplicateRate = duplicates / rows.length;
       
-      if (duplicateRate > 0.01) {
-        findings.push(`Found ${duplicates} duplicate rows (${Math.round(duplicateRate * 100)}%)`);
+      if (duplicates > 0) {
+        findings.push(`Found ${duplicates} duplicate rows (${Math.round(duplicateRate * 100)}% of dataset)`);
       }
       
       // Check identifier columns for uniqueness
@@ -500,14 +527,23 @@ const DIMENSION_CONFIGS: DimensionConfig[] = [
         c.inferredType === 'identifier' || c.name.toLowerCase().includes('id')
       );
       
+      let idDuplicateIssues = 0;
       for (const col of idColumns) {
         if (col.uniqueRatio < 1) {
           impactedColumns.push(col.name);
-          findings.push(`Identifier column '${col.name}' has ${Math.round((1 - col.uniqueRatio) * 100)}% duplicates`);
+          const dupPercentage = Math.round((1 - col.uniqueRatio) * 100);
+          findings.push(`Identifier column '${col.name}' has ${dupPercentage}% non-unique values`);
+          idDuplicateIssues += (1 - col.uniqueRatio);
         }
       }
       
-      const score = Math.round(100 - duplicateRate * 100);
+      // Score: penalize both row duplicates and ID column duplicates
+      // Each 1% duplicate rows = 3 point penalty
+      // ID columns with duplicates add additional penalty
+      const rowPenalty = duplicateRate * 300;
+      const idPenalty = idDuplicateIssues * 20;
+      const score = Math.round(Math.max(0, 100 - rowPenalty - idPenalty));
+      
       return { score, findings, impactedColumns };
     }
   },
@@ -519,43 +555,71 @@ const DIMENSION_CONFIGS: DimensionConfig[] = [
     scorer: (rows, metadata) => {
       const findings: string[] = [];
       const impactedColumns: string[] = [];
-      let validityIssues = 0;
-      let totalChecks = 0;
+      let invalidRecords = 0;
+      const totalRecords = rows.length;
       
       for (const col of metadata.schema) {
-        // Check numeric ranges
-        if (col.statistics) {
-          totalChecks++;
-          
-          // Check for negative values in typically positive fields
-          const positiveFields = ['amount', 'price', 'quantity', 'count', 'total'];
-          if (positiveFields.some(f => col.name.toLowerCase().includes(f))) {
-            if (col.statistics.min < 0) {
-              validityIssues++;
-              impactedColumns.push(col.name);
-              findings.push(`Column '${col.name}' contains invalid negative values (min: ${col.statistics.min})`);
-            }
+        const values = rows.map(r => r[col.name]);
+        
+        // Check for negative values in typically positive fields
+        const positiveFields = ['amount', 'price', 'quantity', 'count', 'total', 'balance', 'fee', 'cost'];
+        if (positiveFields.some(f => col.name.toLowerCase().includes(f))) {
+          const negativeCount = values.filter(v => typeof v === 'number' && v < 0).length;
+          if (negativeCount > 0) {
+            invalidRecords += negativeCount;
+            impactedColumns.push(col.name);
+            findings.push(`Column '${col.name}' has ${negativeCount} invalid negative values`);
           }
           
-          // Check for outliers (values beyond 3 std devs)
-          const upperBound = col.statistics.mean + 3 * col.statistics.stdDev;
-          const lowerBound = col.statistics.mean - 3 * col.statistics.stdDev;
-          if (col.statistics.max > upperBound || col.statistics.min < lowerBound) {
-            validityIssues += 0.5;
-            findings.push(`Column '${col.name}' has potential outliers outside normal range`);
+          // Check for zero values in amount fields
+          const zeroCount = values.filter(v => v === 0).length;
+          if (zeroCount > 0 && col.name.toLowerCase().includes('amount')) {
+            invalidRecords += zeroCount;
+            findings.push(`Column '${col.name}' has ${zeroCount} suspicious zero values`);
           }
         }
         
-        // Check currency codes
-        if (col.patterns.includes('COUNTRY/CURRENCY_CODE')) {
-          totalChecks++;
-          // Simplified check - would use ISO code list in production
+        // Check for outliers in numeric columns
+        if (col.statistics && col.statistics.stdDev > 0) {
+          const numericValues = values.filter(v => typeof v === 'number') as number[];
+          const upperBound = col.statistics.mean + 3 * col.statistics.stdDev;
+          const lowerBound = col.statistics.mean - 3 * col.statistics.stdDev;
+          const outlierCount = numericValues.filter(v => v > upperBound || v < lowerBound).length;
+          if (outlierCount > 0) {
+            invalidRecords += outlierCount;
+            if (!impactedColumns.includes(col.name)) impactedColumns.push(col.name);
+            findings.push(`Column '${col.name}' has ${outlierCount} outlier values (outside 3σ range)`);
+          }
+        }
+        
+        // Check for "NULL", "NA", etc. as string literals
+        const invalidNullStrings = values.filter(v => 
+          typeof v === 'string' && ['null', 'na', 'n/a', 'none', 'undefined', '-', ''].includes(v.toLowerCase().trim())
+        ).length;
+        if (invalidNullStrings > 0) {
+          invalidRecords += invalidNullStrings;
+          if (!impactedColumns.includes(col.name)) impactedColumns.push(col.name);
+          findings.push(`Column '${col.name}' has ${invalidNullStrings} invalid null-like strings`);
+        }
+        
+        // Check for non-numeric values in expected numeric columns
+        if (col.name.toLowerCase().includes('amount') || col.name.toLowerCase().includes('price')) {
+          const nonNumericCount = values.filter(v => 
+            v !== null && v !== undefined && typeof v !== 'number'
+          ).length;
+          if (nonNumericCount > 0) {
+            invalidRecords += nonNumericCount;
+            if (!impactedColumns.includes(col.name)) impactedColumns.push(col.name);
+            findings.push(`Column '${col.name}' has ${nonNumericCount} non-numeric values in numeric field`);
+          }
         }
       }
       
-      const score = totalChecks > 0 
-        ? Math.round(Math.max(0, 100 - (validityIssues / totalChecks) * 40))
-        : 85;
+      // Each invalid record reduces score proportionally
+      // 10% invalid = 30 point penalty
+      const invalidRate = invalidRecords / (totalRecords * metadata.schema.length);
+      const score = Math.round(Math.max(0, 100 - (invalidRate * 300)));
+      
       return { score, findings, impactedColumns };
     }
   },
@@ -564,53 +628,84 @@ const DIMENSION_CONFIGS: DimensionConfig[] = [
     name: 'Timeliness',
     baseWeight: 0.10,
     applicabilityCheck: (metadata) => {
-      return metadata.schema.some(c => c.inferredType === 'date');
+      return metadata.schema.some(c => c.inferredType === 'date' || c.name.toLowerCase().includes('date'));
     },
     scorer: (rows, metadata) => {
       const findings: string[] = [];
       const impactedColumns: string[] = [];
       
-      const dateColumns = metadata.schema.filter(c => c.inferredType === 'date');
+      const dateColumns = metadata.schema.filter(c => 
+        c.inferredType === 'date' || c.name.toLowerCase().includes('date')
+      );
+      
       if (dateColumns.length === 0) {
         return { score: 100, findings: ['No date columns to evaluate'], impactedColumns: [] };
       }
       
       const now = new Date();
-      let timelinessIssues = 0;
-      let checkedDates = 0;
+      let totalDates = 0;
+      let futureDates = 0;
+      let staleDates = 0;
+      let invalidDates = 0;
       
       for (const col of dateColumns) {
-        // Check sample dates
-        for (const row of rows.slice(0, 100)) {
+        for (const row of rows) {
           const dateVal = row[col.name];
-          if (dateVal && typeof dateVal === 'string') {
+          if (dateVal === null || dateVal === undefined || dateVal === '') continue;
+          
+          totalDates++;
+          
+          if (typeof dateVal === 'string') {
             const date = new Date(dateVal);
-            if (!isNaN(date.getTime())) {
-              checkedDates++;
-              
-              // Future dates (potential error)
-              if (date > now) {
-                timelinessIssues++;
-                if (!impactedColumns.includes(col.name)) {
-                  impactedColumns.push(col.name);
-                  findings.push(`Column '${col.name}' contains future dates`);
-                }
+            
+            // Check for invalid dates
+            if (isNaN(date.getTime())) {
+              invalidDates++;
+              if (!impactedColumns.includes(col.name)) {
+                impactedColumns.push(col.name);
+                findings.push(`Column '${col.name}' contains invalid date values`);
               }
-              
-              // Very old dates (data staleness)
-              const yearsDiff = (now.getTime() - date.getTime()) / (365 * 24 * 60 * 60 * 1000);
-              if (yearsDiff > 5) {
-                timelinessIssues += 0.5;
+              continue;
+            }
+            
+            // Future dates (potential error)
+            if (date > now) {
+              futureDates++;
+              if (!findings.some(f => f.includes('future dates'))) {
+                impactedColumns.push(col.name);
+                findings.push(`Column '${col.name}' contains future dates (data integrity issue)`);
               }
+            }
+            
+            // Very old dates (data staleness) - more than 2 years old
+            const yearsDiff = (now.getTime() - date.getTime()) / (365 * 24 * 60 * 60 * 1000);
+            if (yearsDiff > 2) {
+              staleDates++;
             }
           }
         }
       }
       
-      const score = checkedDates > 0
-        ? Math.round(Math.max(0, 100 - (timelinessIssues / checkedDates) * 100))
-        : 80;
+      if (totalDates === 0) {
+        return { score: 80, findings: ['No valid dates found to evaluate'], impactedColumns };
+      }
       
+      // Calculate penalties
+      const futurePenalty = (futureDates / totalDates) * 150; // Heavy penalty for future dates
+      const invalidPenalty = (invalidDates / totalDates) * 100;
+      const stalePenalty = (staleDates / totalDates) * 30;
+      
+      if (futureDates > 0) {
+        findings.push(`${futureDates} records have future dates`);
+      }
+      if (invalidDates > 0) {
+        findings.push(`${invalidDates} records have invalid/unparseable dates`);
+      }
+      if (staleDates > 0) {
+        findings.push(`${staleDates} records have dates older than 2 years`);
+      }
+      
+      const score = Math.round(Math.max(0, 100 - futurePenalty - invalidPenalty - stalePenalty));
       return { score, findings, impactedColumns };
     }
   },
@@ -622,27 +717,55 @@ const DIMENSION_CONFIGS: DimensionConfig[] = [
     scorer: (rows, metadata) => {
       const findings: string[] = [];
       const impactedColumns: string[] = [];
-      let accuracyIssues = 0;
-      let totalChecks = 0;
+      let inaccurateRecords = 0;
+      const totalRecords = rows.length;
       
       for (const col of metadata.schema) {
-        totalChecks++;
+        const values = rows.map(r => r[col.name]);
         
-        // Mixed types indicate accuracy issues
+        // Mixed types indicate accuracy issues - count each mixed value
         if (col.inferredType === 'mixed') {
-          accuracyIssues++;
+          const mixedCount = Math.round(rows.length * 0.2); // Estimate 20% are type mismatches
+          inaccurateRecords += mixedCount;
           impactedColumns.push(col.name);
-          findings.push(`Column '${col.name}' has mixed data types indicating accuracy issues`);
+          findings.push(`Column '${col.name}' has mixed data types (data entry errors)`);
         }
         
-        // Low uniqueness in identifier columns
-        if ((col.name.toLowerCase().includes('id') || col.inferredType === 'identifier') && col.uniqueRatio < 0.95) {
-          accuracyIssues += 0.5;
-          findings.push(`Identifier column '${col.name}' has unexpected duplicates`);
+        // Check for identifier columns with duplicates
+        if ((col.name.toLowerCase().includes('id') || col.inferredType === 'identifier') && col.uniqueRatio < 1) {
+          const dupCount = Math.round((1 - col.uniqueRatio) * rows.length);
+          inaccurateRecords += dupCount;
+          if (!impactedColumns.includes(col.name)) impactedColumns.push(col.name);
+          findings.push(`Identifier column '${col.name}' has ${dupCount} duplicate values`);
+        }
+        
+        // Check for numeric columns with non-numeric values
+        if (col.name.toLowerCase().includes('amount') || 
+            col.name.toLowerCase().includes('price') || 
+            col.name.toLowerCase().includes('quantity')) {
+          const nonNumericCount = values.filter(v => 
+            v !== null && v !== undefined && typeof v !== 'number'
+          ).length;
+          if (nonNumericCount > 0) {
+            inaccurateRecords += nonNumericCount;
+            if (!impactedColumns.includes(col.name)) impactedColumns.push(col.name);
+            findings.push(`Column '${col.name}' has ${nonNumericCount} non-numeric values`);
+          }
+        }
+        
+        // Check for empty strings that should be null
+        const emptyStringCount = values.filter(v => v === '').length;
+        if (emptyStringCount > 0) {
+          inaccurateRecords += emptyStringCount;
+          if (!impactedColumns.includes(col.name)) impactedColumns.push(col.name);
+          findings.push(`Column '${col.name}' has ${emptyStringCount} empty strings (should be null)`);
         }
       }
       
-      const score = Math.round(Math.max(0, 100 - (accuracyIssues / totalChecks) * 30));
+      // Score: each 1% inaccurate records = 3 point penalty
+      const inaccuracyRate = inaccurateRecords / (totalRecords * metadata.schema.length);
+      const score = Math.round(Math.max(0, 100 - (inaccuracyRate * 300)));
+      
       return { score, findings, impactedColumns };
     }
   },
@@ -651,38 +774,70 @@ const DIMENSION_CONFIGS: DimensionConfig[] = [
     name: 'Integrity',
     baseWeight: 0.10,
     applicabilityCheck: (metadata) => {
-      // Applicable if there are multiple related columns
       return metadata.columnCount > 3;
     },
     scorer: (rows, metadata) => {
       const findings: string[] = [];
       const impactedColumns: string[] = [];
-      let integrityScore = 100;
+      let integrityIssues = 0;
+      const totalRecords = rows.length;
       
-      // Check for orphan records (null foreign keys)
+      // Check for orphan records (null foreign keys / reference columns)
       const fkColumns = metadata.schema.filter(c => 
         c.name.toLowerCase().includes('_id') || 
-        c.name.toLowerCase().endsWith('id') && c.name.length > 2
+        (c.name.toLowerCase().endsWith('id') && c.name.length > 2) ||
+        c.name.toLowerCase().includes('merchant') ||
+        c.name.toLowerCase().includes('customer')
       );
       
       for (const col of fkColumns) {
-        if (col.nullRatio > 0.05) {
-          integrityScore -= 10;
+        const nullCount = Math.round(col.nullRatio * totalRecords);
+        if (nullCount > 0) {
+          integrityIssues += nullCount;
           impactedColumns.push(col.name);
-          findings.push(`Reference column '${col.name}' has ${Math.round(col.nullRatio * 100)}% null values`);
+          findings.push(`Reference column '${col.name}' has ${nullCount} null values (orphan records)`);
         }
+      }
+      
+      // Check for rows with mostly empty values (incomplete records)
+      let incompleteRows = 0;
+      for (const row of rows) {
+        const values = Object.values(row);
+        const nullCount = values.filter(v => v === null || v === undefined || v === '').length;
+        if (nullCount > values.length * 0.5) {
+          incompleteRows++;
+        }
+      }
+      if (incompleteRows > 0) {
+        integrityIssues += incompleteRows * 2;
+        findings.push(`${incompleteRows} rows are more than 50% empty (incomplete records)`);
       }
       
       // Check for referential patterns
       const hasAmount = metadata.schema.some(c => c.name.toLowerCase().includes('amount'));
       const hasCurrency = metadata.schema.some(c => c.name.toLowerCase().includes('currency'));
+      const hasStatus = metadata.schema.some(c => c.name.toLowerCase().includes('status'));
       
       if (hasAmount && !hasCurrency) {
-        integrityScore -= 5;
+        integrityIssues += Math.round(totalRecords * 0.1);
         findings.push('Amount field exists without corresponding currency field');
       }
       
-      return { score: Math.max(0, integrityScore), findings, impactedColumns };
+      // Check for status field with null values
+      if (hasStatus) {
+        const statusCol = metadata.schema.find(c => c.name.toLowerCase().includes('status'));
+        if (statusCol && statusCol.nullRatio > 0) {
+          const nullCount = Math.round(statusCol.nullRatio * totalRecords);
+          integrityIssues += nullCount;
+          findings.push(`Status column has ${nullCount} missing values`);
+        }
+      }
+      
+      // Score based on integrity issue rate
+      const integrityRate = integrityIssues / totalRecords;
+      const score = Math.round(Math.max(0, 100 - (integrityRate * 100)));
+      
+      return { score, findings, impactedColumns };
     }
   }
 ];
@@ -915,6 +1070,44 @@ export async function analyzeDQI(file: File): Promise<DQIReport> {
         const duplicateRows = rows.length - uniqueRows;
         const totalCells = rows.length * headers.length;
         const nullCells = schema.reduce((sum, col) => sum + Math.round(col.nullRatio * rows.length), 0);
+        
+        // Count anomalies (outliers, invalid values, future dates, etc.)
+        let anomalyCount = 0;
+        
+        // Count negative amounts
+        for (const col of schema) {
+          if (col.statistics && col.name.toLowerCase().includes('amount')) {
+            if (col.statistics.min < 0) {
+              const values = rows.map(r => r[col.name]).filter(v => typeof v === 'number') as number[];
+              anomalyCount += values.filter(v => v < 0).length;
+            }
+          }
+        }
+        
+        // Count future dates
+        const now = new Date();
+        const dateColumns = schema.filter(c => c.inferredType === 'date' || c.name.toLowerCase().includes('date'));
+        for (const col of dateColumns) {
+          for (const row of rows) {
+            const dateVal = row[col.name];
+            if (dateVal && typeof dateVal === 'string') {
+              const date = new Date(dateVal);
+              if (!isNaN(date.getTime()) && date > now) {
+                anomalyCount++;
+              }
+            }
+          }
+        }
+        
+        // Count statistical outliers
+        for (const col of schema) {
+          if (col.statistics && col.statistics.stdDev > 0) {
+            const upperBound = col.statistics.mean + 3 * col.statistics.stdDev;
+            const lowerBound = col.statistics.mean - 3 * col.statistics.stdDev;
+            const values = rows.map(r => r[col.name]).filter(v => typeof v === 'number') as number[];
+            anomalyCount += values.filter(v => v > upperBound || v < lowerBound).length;
+          }
+        }
 
         // Generate data hash for audit trail
         const dataHash = await generateDataHash(content.substring(0, 10000)); // Hash first 10K chars
@@ -930,7 +1123,7 @@ export async function analyzeDQI(file: File): Promise<DQIReport> {
             nullCells,
             uniqueRows,
             duplicateRows,
-            anomalyCount: 0, // Will be updated
+            anomalyCount,
           },
           dataHash,
           analyzedAt: new Date().toISOString(),
