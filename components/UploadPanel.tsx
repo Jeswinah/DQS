@@ -1,62 +1,57 @@
 import React from 'react';
 import { Role } from '../types/dqs';
+import { analyzeDQI, storeDQIReport, type DQIReport } from '../lib/dqiEngine';
 
 interface Props {
   role: Role;
-  onAnalyze: (file: File | null) => void;
+  onAnalyze: (file: File | null, report?: DQIReport) => void;
 }
 
 /**
  * UploadPanel: Secure dataset input control.
- * Accepts CSV/Excel/API. No raw data displayed.
+ * Accepts CSV/Excel. No raw data stored - only metadata analyzed.
+ * Privacy-preserving: All analysis happens client-side.
  */
 export const UploadPanel: React.FC<Props> = ({ role, onAnalyze }) => {
-  // const [sensitivity, setSensitivity] = React.useState('Medium');
   const [sourceType, setSourceType] = React.useState('File');
   const [governanceAck, setGovernanceAck] = React.useState(false);
   const [selectedFile, setSelectedFile] = React.useState<File | null>(null);
-  const [isUploading, setIsUploading] = React.useState(false);
+  const [isAnalyzing, setIsAnalyzing] = React.useState(false);
+  const [analysisStatus, setAnalysisStatus] = React.useState<string>('');
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] || null;
     setSelectedFile(file);
+    setAnalysisStatus('');
   };
 
   const handleAnalyze = async () => {
     if (!selectedFile) return;
 
-    setIsUploading(true);
+    setIsAnalyzing(true);
+    setAnalysisStatus('Extracting metadata...');
+    
     try {
-      const formData = new FormData();
-      formData.append('file', selectedFile);
-
-      const response = await fetch('https://akash248.app.n8n.cloud/webhook/visa-dqs-assessment', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Upload failed: ${response.statusText}`);
-      }
-
-      // Check if response has content before parsing JSON
-      const contentType = response.headers.get('content-type');
-      let data = null;
+      // Client-side DQI analysis - no data leaves the browser
+      setAnalysisStatus('Analyzing data quality dimensions...');
+      const report = await analyzeDQI(selectedFile);
       
-      if (contentType && contentType.includes('application/json')) {
-        const text = await response.text();
-        if (text) {
-          data = JSON.parse(text);
-          console.log('Analysis response:', data);
-        }
-      }
+      setAnalysisStatus('Generating recommendations...');
       
-      onAnalyze(selectedFile);
+      // Store report in localStorage for dashboard
+      storeDQIReport(report);
+      
+      console.log('DQI Report generated:', report);
+      setAnalysisStatus('Analysis complete!');
+      
+      // Pass both file and report to parent
+      onAnalyze(selectedFile, report);
     } catch (error) {
-      console.error('Error uploading file:', error);
-      alert('Failed to upload file. Please try again.');
+      console.error('Analysis error:', error);
+      setAnalysisStatus('Analysis failed. Please check the file format.');
+      alert('Failed to analyze file. Please ensure it is a valid CSV file.');
     } finally {
-      setIsUploading(false);
+      setIsAnalyzing(false);
     }
   };
 
@@ -131,15 +126,28 @@ export const UploadPanel: React.FC<Props> = ({ role, onAnalyze }) => {
           <span>I confirm that governance policies have been reviewed and acknowledged.</span>
         </label>
 
+        {/* Analysis status */}
+        {analysisStatus && (
+          <div className="text-xs text-center py-2" style={{ color: analysisStatus.includes('complete') ? '#10b981' : '#64748b' }}>
+            {analysisStatus}
+          </div>
+        )}
+
         {/* Analyze button */}
         <button
-          disabled={!governanceAck || !selectedFile || isUploading}
+          disabled={!governanceAck || !selectedFile || isAnalyzing}
           onClick={handleAnalyze}
           className="mt-1 w-full rounded-lg py-2.5 text-sm font-semibold text-white transition disabled:opacity-40"
           style={{ background: '#1229D0' }}
         >
-          {isUploading ? '⏳ Uploading...' : '🔍 Analyze Data Quality'}
+          {isAnalyzing ? '⏳ Analyzing...' : '🔍 Analyze Data Quality'}
         </button>
+
+        {/* Privacy notice */}
+        <div className="text-xs text-center" style={{ color: '#94a3b8' }}>
+          🔒 Privacy-first: All analysis happens locally in your browser.<br />
+          No raw data is transmitted or stored.
+        </div>
 
         <div className="text-xs" style={{ color: '#94a3b8' }}>
           Current role: <span className="font-medium">{role}</span>

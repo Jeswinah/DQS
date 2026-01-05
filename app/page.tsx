@@ -3,11 +3,12 @@
 import React from 'react';
 import { useRouter } from 'next/navigation';
 import { MdInsights, MdSecurity, MdSpeed, MdAutoAwesome } from 'react-icons/md';
-import { parseFileAndCalculateMetrics, storeMetrics, assessDataQuality, storeAPIResponse } from '../lib/parseFile';
+import { analyzeDQI, storeDQIReport } from '../lib/dqiEngine';
 
 /**
  * Landing Page: Secure Data Input Panel
  * Professional, minimal design focused on data governance
+ * Privacy-first: All analysis happens client-side
  */
 export default function Home() {
   const router = useRouter();
@@ -34,35 +35,30 @@ export default function Home() {
 
     setIsAnalyzing(true);
     setError(null);
-    setProgress('Uploading file to assessment API...');
+    setProgress('Extracting metadata from file...');
 
     try {
-      // Call the API to assess data quality
-      const apiResponse = await assessDataQuality(selectedFile);
+      // Client-side DQI analysis - no data leaves the browser
+      await new Promise(resolve => setTimeout(resolve, 300));
+      setProgress('Analyzing data quality dimensions...');
       
-      setProgress('Processing assessment results...');
-      await new Promise(resolve => setTimeout(resolve, 500));
+      const report = await analyzeDQI(selectedFile);
       
-      setProgress('Storing results...');
-      storeAPIResponse(apiResponse);
+      setProgress('Generating recommendations...');
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      setProgress('Storing results locally...');
+      storeDQIReport(report);
       
       setProgress('Redirecting to dashboard...');
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise(resolve => setTimeout(resolve, 200));
       
       router.push('/dashboard');
     } catch (err) {
-      console.error('API Assessment failed:', err);
-      // Fallback to local analysis if API fails
-      setProgress('API unavailable, using local analysis...');
-      try {
-        const metrics = await parseFileAndCalculateMetrics(selectedFile);
-        storeMetrics(metrics);
-        router.push('/dashboard');
-      } catch (localErr) {
-        setError(localErr instanceof Error ? localErr.message : 'Failed to analyze file');
-        setIsAnalyzing(false);
-        setProgress('');
-      }
+      console.error('Analysis failed:', err);
+      setError(err instanceof Error ? err.message : 'Failed to analyze file. Please ensure it is a valid CSV file.');
+      setIsAnalyzing(false);
+      setProgress('');
     }
   };
 

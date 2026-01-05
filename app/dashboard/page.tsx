@@ -21,8 +21,8 @@ import {
 import { RecommendationsList } from '../../components/RecommendationsList';
 import { CompliancePanel } from '../../components/CompliancePanel';
 import { MetadataSummary } from '../../components/MetadataSummary';
-import { getStoredMetrics, getStoredTimestamp, assessDataQuality, storeAPIResponse, getStoredAPIResponse, type DQMetrics } from '../../lib/parseFile';
-import type { DQSummary, Role, DimensionScore, APIResponse } from '../../types/dqs';
+import { getStoredDQIReport, type DQIReport } from '../../lib/dqiEngine';
+import type { DQSummary, Role, DimensionScore } from '../../types/dqs';
 
 // Generate explanations based on scores
 function generateExplanation(dimension: string, score: number): string {
@@ -60,193 +60,64 @@ function generateExplanation(dimension: string, score: number): string {
   return explanations[dimension]?.(score) || `Score: ${score}%`;
 }
 
-// Generate recommendations based on metrics
-function generateRecommendations(metrics: DQMetrics) {
-  const recs: DQSummary['recommendations'] = [];
-  const dims = metrics.dimensions;
-  
-  if (dims.completeness < 80) {
-    recs.push({
-      id: 'r1',
-      title: `Address ${100 - dims.completeness}% missing values in dataset`,
-      severity: dims.completeness < 50 ? 'High' : 'Medium',
-      expectedImprovement: Math.round((80 - dims.completeness) * 0.5),
-      action: 'Fill Data'
+// Convert DQI Report to DQSummary format for dashboard display
+function convertDQIReportToSummary(report: DQIReport): DQSummary {
+  // Convert dimensions from DQI format to dashboard format
+  const dimensions: DimensionScore[] = report.dimensions
+    .filter(d => d.applicable)
+    .map(d => {
+      const explanation = report.explanations.find(e => e.dimension === d.name);
+      return {
+        id: d.id,
+        name: d.name,
+        score: d.score,
+        explanation: explanation?.summary || `${d.name} score: ${d.score}%`,
+      };
     });
-  }
-  
-  if (dims.uniqueness < 90) {
-    recs.push({
-      id: 'r2',
-      title: 'Implement deduplication to remove duplicate records',
-      severity: dims.uniqueness < 70 ? 'High' : 'Low',
-      expectedImprovement: Math.round((90 - dims.uniqueness) * 0.3),
-      action: 'Dedupe'
-    });
-  }
-  
-  if (dims.validity < 80) {
-    recs.push({
-      id: 'r3',
-      title: 'Add input validation rules for data entry',
-      severity: 'Medium',
-      expectedImprovement: Math.round((80 - dims.validity) * 0.4),
-      action: 'Validate'
-    });
-  }
-  
-  if (dims.timeliness < 70) {
-    recs.push({
-      id: 'r4',
-      title: 'Optimize data pipeline for faster ingestion',
-      severity: 'High',
-      expectedImprovement: 8,
-      action: 'Optimize'
-    });
-  }
-  
-  // Add column-specific recommendations
-  const lowCompleteCols = metrics.columnStats.filter(c => c.completeness < 70);
-  if (lowCompleteCols.length > 0) {
-    recs.push({
-      id: 'r5',
-      title: `Review columns with low completeness: ${lowCompleteCols.slice(0, 3).map(c => c.name).join(', ')}`,
-      severity: 'Medium',
-      expectedImprovement: 5,
-      action: 'Review'
-    });
-  }
-  
-  if (recs.length === 0) {
-    recs.push({
-      id: 'r0',
-      title: 'Data quality is excellent. Continue monitoring.',
-      severity: 'Low',
-      expectedImprovement: 0,
-      action: 'Monitor'
-    });
-  }
-  
-  return recs;
-}
 
-// Convert stored metrics to DQSummary format
-function convertToDQSummary(metrics: DQMetrics, timestamp: string): DQSummary {
-  return {
-    score: metrics.score,
-    confidence: metrics.confidence,
-    timestamp: new Date(timestamp).toLocaleString(),
-    dimensions: [
-      { id: 'completeness', name: 'Completeness', score: metrics.dimensions.completeness, explanation: generateExplanation('completeness', metrics.dimensions.completeness) },
-      { id: 'accuracy', name: 'Accuracy', score: metrics.dimensions.accuracy, explanation: generateExplanation('accuracy', metrics.dimensions.accuracy) },
-      { id: 'consistency', name: 'Consistency', score: metrics.dimensions.consistency, explanation: generateExplanation('consistency', metrics.dimensions.consistency) },
-      { id: 'timeliness', name: 'Timeliness', score: metrics.dimensions.timeliness, explanation: generateExplanation('timeliness', metrics.dimensions.timeliness) },
-      { id: 'uniqueness', name: 'Uniqueness', score: metrics.dimensions.uniqueness, explanation: generateExplanation('uniqueness', metrics.dimensions.uniqueness) },
-      { id: 'validity', name: 'Validity', score: metrics.dimensions.validity, explanation: generateExplanation('validity', metrics.dimensions.validity) },
-      { id: 'integrity', name: 'Integrity', score: metrics.dimensions.integrity, explanation: generateExplanation('integrity', metrics.dimensions.integrity) },
-    ],
-    recommendations: generateRecommendations(metrics),
-    metadata: { 
-      records: metrics.metadata.records, 
-      columns: metrics.metadata.columns, 
-      missingValues: metrics.metadata.missingValues, 
-      anomalies: metrics.metadata.anomalies,
-      fileName: metrics.metadata.fileName,
-      duplicates: metrics.metadata.duplicates,
-      columnStats: metrics.columnStats.map(c => ({
-        name: c.name,
-        completeness: c.completeness,
-        uniqueCount: c.uniqueCount,
-        dataType: c.dataType
-      }))
-    },
-    audit: {
-      hash: '0x' + Array.from({length: 40}, () => Math.floor(Math.random() * 16).toString(16)).join(''),
-      evaluatedAt: timestamp,
-      policies: ['Data Completeness Policy', 'Format Validation Rules', 'Duplicate Detection Policy'],
-      modelVersion: 'dq-agentic-v2.4.1',
-    },
-  };
-}
-
-// Convert API response to DQSummary format
-function convertAPIResponseToSummary(apiResponse: APIResponse): DQSummary {
-  // Parse explanations from array
-  const explanationTexts = apiResponse.explanations || [];
-  
-  // Parse recommendations from array
-  const recommendationItems = (apiResponse.recommendations || []).map((rec, idx) => ({
-    id: `api-r${idx + 1}`,
-    title: rec,
-    severity: apiResponse.riskLevel === 'HIGH' ? 'High' as const : 
-              apiResponse.riskLevel === 'MEDIUM' ? 'Medium' as const : 'Low' as const,
-    expectedImprovement: 0,
-    action: 'Review'
+  // Convert recommendations
+  const recommendations = report.recommendations.map(r => ({
+    id: r.id,
+    title: r.title,
+    severity: r.priority === 'Critical' ? 'High' as const : r.priority as 'High' | 'Medium' | 'Low',
+    expectedImprovement: r.expectedImprovement,
+    action: r.remediation.split('.')[0] || 'Review',
   }));
 
-  // If no recommendations from API, add a default one based on score
-  if (recommendationItems.length === 0 && apiResponse.compositeDQS < 80) {
-    recommendationItems.push({
-      id: 'api-r1',
-      title: 'Review data quality issues and implement corrective measures',
-      severity: apiResponse.riskLevel === 'HIGH' ? 'High' : 'Medium',
-      expectedImprovement: Math.round(80 - apiResponse.compositeDQS),
-      action: 'Review'
-    });
-  }
-
-  // Create default dimensions if empty from API
-  const dimensions: DimensionScore[] = [];
-  if (apiResponse.dimensions && apiResponse.dimensions.length > 0) {
-    // Parse dimension data if available
-    apiResponse.dimensions.forEach((dim, idx) => {
-      dimensions.push({
-        id: `dim${idx}`,
-        name: typeof dim === 'string' ? dim : `Dimension ${idx + 1}`,
-        score: apiResponse.compositeDQS,
-        explanation: explanationTexts[idx] || 'No explanation available'
-      });
-    });
-  } else {
-    // Generate default dimensions based on score
-    const defaultDimensions = [
-      'Completeness', 'Accuracy', 'Consistency', 'Timeliness', 
-      'Uniqueness', 'Validity', 'Integrity'
-    ];
-    defaultDimensions.forEach((name, idx) => {
-      dimensions.push({
-        id: name.toLowerCase(),
-        name,
-        score: apiResponse.compositeDQS,
-        explanation: explanationTexts[idx] || generateExplanation(name.toLowerCase(), apiResponse.compositeDQS)
-      });
-    });
-  }
+  // Extract column stats from schema
+  const columnStats = report.datasetMetadata.schema.map(col => ({
+    name: col.name,
+    completeness: Math.round((1 - col.nullRatio) * 100),
+    uniqueCount: Math.round(col.uniqueRatio * report.datasetMetadata.rowCount),
+    dataType: col.inferredType,
+  }));
 
   return {
-    score: apiResponse.compositeDQS,
-    confidence: 85, // Default confidence
-    timestamp: new Date(apiResponse.timestamp).toLocaleString(),
+    score: report.compositeDQS.score,
+    confidence: report.compositeDQS.confidence,
+    timestamp: new Date(report.datasetMetadata.analyzedAt).toLocaleString(),
     dimensions,
-    recommendations: recommendationItems,
+    recommendations,
     metadata: {
-      records: 0, // API doesn't provide this
-      columns: 0, // API doesn't provide this
-      missingValues: 0,
-      anomalies: 0,
-      fileName: 'API Assessment',
+      records: report.datasetMetadata.rowCount,
+      columns: report.datasetMetadata.columnCount,
+      missingValues: report.datasetMetadata.statisticalSummary.nullCells,
+      anomalies: report.datasetMetadata.statisticalSummary.anomalyCount,
+      fileName: report.datasetMetadata.fileName,
+      duplicates: report.datasetMetadata.statisticalSummary.duplicateRows,
+      columnStats,
     },
     audit: {
-      hash: '0x' + apiResponse.evaluationId.padStart(40, '0'),
-      evaluatedAt: apiResponse.timestamp,
-      policies: ['Visa-Level Data Quality Standards', 'Risk Assessment Policy'],
-      modelVersion: 'visa-dqs-v1.0',
+      hash: '0x' + report.datasetMetadata.dataHash.substring(0, 40),
+      evaluatedAt: report.auditTrail.timestamp,
+      policies: ['Data Completeness Policy', 'Format Validation Rules', 'Duplicate Detection Policy', 'Privacy Protection Policy'],
+      modelVersion: report.auditTrail.engineVersion,
     },
-    qualityGrade: apiResponse.qualityGrade,
-    complianceStatus: apiResponse.complianceStatus.trim(),
-    evaluationId: apiResponse.evaluationId,
-    riskLevel: apiResponse.riskLevel,
-    dataHandling: apiResponse.dataHandling.replace(/^"|"$/g, ''),
+    qualityGrade: report.compositeDQS.grade,
+    complianceStatus: report.complianceStatus,
+    evaluationId: report.auditTrail.evaluationId,
+    riskLevel: report.overallRiskSummary.split(':')[0].trim(),
+    dataHandling: 'Privacy-preserving: No raw data stored. Metadata-only analysis.',
   };
 }
 
@@ -456,21 +327,14 @@ export default function Dashboard() {
   const [loading, setLoading] = React.useState(true);
 
   React.useEffect(() => {
-    // First try to load API response
-    const apiResponse = getStoredAPIResponse();
-    if (apiResponse) {
-      setSummary(convertAPIResponseToSummary(apiResponse));
+    // Load DQI Report from localStorage
+    const dqiReport = getStoredDQIReport();
+    if (dqiReport) {
+      setSummary(convertDQIReportToSummary(dqiReport));
       setLoading(false);
       return;
     }
 
-    // Fallback to old metrics format
-    const metrics = getStoredMetrics();
-    const timestamp = getStoredTimestamp();
-    
-    if (metrics && timestamp) {
-      setSummary(convertToDQSummary(metrics, timestamp));
-    }
     setLoading(false);
   }, []);
 
